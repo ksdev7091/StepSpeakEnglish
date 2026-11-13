@@ -140,58 +140,97 @@ function unlockSpeech() {
  */
 function startRecognition({ lang, prefix = "", silenceMs, onInterim, onDone }) {
   stopSpeaking();
-  const rec = new Recognition();
-  recognition = rec;
-  rec.lang = lang;
-  rec.interimResults = true;
-  // Android の Chrome は continuous だと結果が重複するので単発で使う
-  rec.continuous = !/Android/i.test(navigator.userAgent);
-
+  // Android の Chrome は continuous だと結果が重複するので単発で使う。単発だと少しの間で
+  // ブラウザが聞き取りを打ち切るため、待ち時間が残っているうちは自動で聞き取りを再開する
+  const restartable = /Android/i.test(navigator.userAgent);
+  let base = prefix;
   let transcript = "";
   let failure = "";
+  let finished = false;
+  let stopping = false;
+  let restarts = 0;
   let silence;
-  const joined = () => `${prefix} ${transcript}`.replace(/\s+/g, " ").trim();
+  let rec;
+  const joined = () => `${base} ${transcript}`.replace(/\s+/g, " ").trim();
+
+  const session = {
+    stop() {
+      stopping = true;
+      clearTimeout(silence);
+      rec.stop();
+    },
+    abort() {
+      finished = true;
+      clearTimeout(silence);
+      rec.abort();
+    },
+  };
+  recognition = session;
+
   const armSilence = (ms) => {
     clearTimeout(silence);
-    silence = setTimeout(() => rec.stop(), ms);
+    silence = setTimeout(() => session.stop(), ms);
   };
-
-  rec.onresult = (event) => {
-    transcript = Array.from(event.results, (r) => r[0].transcript).join(" ");
-    onInterim(joined());
-    armSilence(silenceMs);
-  };
-  rec.onerror = (event) => {
-    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-      failure = "マイクが許可されていません。ブラウザの設定でマイクを許可してください。";
-    } else if (event.error === "network") {
-      failure = "音声認識に接続できませんでした。";
-    }
-  };
-  rec.onend = () => {
+  const finish = () => {
+    if (finished) return;
+    finished = true;
     clearTimeout(silence);
-    if (recognition !== rec) return;
-    recognition = null;
+    if (recognition === session) recognition = null;
     onDone(joined(), failure);
+  };
+  const begin = () => {
+    rec = new Recognition();
+    rec.lang = lang;
+    rec.interimResults = true;
+    rec.continuous = !restartable;
+    rec.onresult = (event) => {
+      transcript = Array.from(event.results, (r) => r[0].transcript).join(" ");
+      onInterim(joined());
+      armSilence(silenceMs);
+    };
+    rec.onerror = (event) => {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        failure = "マイクが許可されていません。ブラウザの設定でマイクを許可してください。";
+      } else if (event.error === "network") {
+        failure = "音声認識に接続できませんでした。";
+      } else if (event.error === "audio-capture") {
+        failure = "マイクが見つかりませんでした。";
+      }
+    };
+    rec.onend = () => {
+      if (finished) return;
+      if (restartable && !stopping && !failure && restarts < 20) {
+        restarts++;
+        base = joined();
+        transcript = "";
+        try {
+          return begin();
+        } catch {
+          // 再開できなければ、ここまでの聞き取りで終える
+        }
+      }
+      finish();
+    };
+    rec.start();
   };
 
   try {
-    rec.start();
+    begin();
     armSilence(12000);
   } catch {
-    recognition = null;
-    onDone(prefix, "マイクを開始できませんでした。");
+    failure = "マイクを開始できませんでした。";
+    finish();
   }
 }
 
 function stopListening(discard = false) {
-  const rec = recognition;
-  if (!rec) return;
+  const session = recognition;
+  if (!session) return;
   if (discard) {
     recognition = null;
-    rec.abort();
+    session.abort();
   } else {
-    rec.stop();
+    session.stop();
   }
 }
 
