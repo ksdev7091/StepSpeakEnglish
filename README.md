@@ -37,7 +37,7 @@ npm start
 | 環境変数 | 説明 | 既定値 |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Anthropic の APIキー(必須) | – |
-| `CLAUDE_MODEL` | 会話に使うモデル | `claude-opus-5-5` |
+| `CLAUDE_MODEL` | 会話に使うモデル。添削の質を上げたいときは `claude-sonnet-5-5` や `claude-opus-5-5` に | `claude-haiku-5-5` |
 | `APP_PASSWORD` | 公開時の合言葉(未設定なら合言葉なし) | – |
 | `PORT` | ポート番号 | `3000` |
 

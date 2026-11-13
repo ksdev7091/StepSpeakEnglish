@@ -8,7 +8,7 @@ import { z } from "zod";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
-const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
+const MODEL = process.env.CLAUDE_MODEL || "claude-haiku-5-5";
 
 // 会話はテンポが大事なので、深く考えさせず短く返させる
 const EFFORT = "low";
@@ -233,6 +233,7 @@ async function ask({ system, messages, schema }) {
     messages,
     output_config: { effort: EFFORT, format: zodOutputFormat(schema) },
     // 安全フィルタで断られた場合に、サーバー側で別モデルへ自動的に切り替える
+    // (対応していないモデルでは何も起きず、断られたままになる)
     betas: ["server-side-fallback-2026-07-01"],
     fallbacks: "default",
   });
