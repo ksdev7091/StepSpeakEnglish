@@ -1,0 +1,18 @@
+{
+  "name": "step-speak-english",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIと声で会話しながら英語を練習するWebアプリ",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "express": "^5.3.0",
+    "zod": "^4.6.7"
+  }
+}
