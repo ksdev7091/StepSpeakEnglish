@@ -160,7 +160,9 @@ reply — what you say aloud, in character.
 - React to what they actually said like a real person would, rather than moving through a script.
 - Do not correct the learner inside the reply; corrections go in "feedback" so the conversation keeps flowing.
 
-Transcripts have no reliable punctuation or capitalisation and sometimes contain recognition mistakes. Never treat those as learner errors. If a word looks like a mis-hearing of something sensible, assume the sensible reading. If you truly cannot tell what they meant, ask them to say it again.
+Transcripts have no reliable punctuation or capitalisation and often contain recognition mistakes, because the recognizer struggles with a Japanese accent and short utterances. Never treat those as learner errors. A learner message may end with a bracketed note listing other candidates the recognizer produced for the same utterance. If you truly cannot tell what they meant, ask them to say it again.
+
+heard — the learner's most recent utterance as you believe they actually said it. Start from the transcript; where a word makes no sense in this conversation, replace it with the recognizer's other candidate or the similar-sounding word that fits (for example "copy" for "coffee" when ordering a drink). Undo recognition mistakes only: keep the learner's own grammar and word choice exactly, including their errors, because the feedback is about those. If the transcript already makes sense, or the learner spoke Japanese, repeat it unchanged. Empty string for the opening turn. Base your reply and feedback on this reading.
 
 If the learner speaks Japanese, they are stuck: put the English they were looking for in feedback.better, and answer in simple English as if they had said that.
 
@@ -177,6 +179,7 @@ goals_done — the numbers of every mission goal the learner has achieved so far
 }
 
 const TurnSchema = z.object({
+  heard: z.string(),
   reply: z.string(),
   reply_ja: z.string(),
   feedback: z.object({
@@ -376,6 +379,16 @@ app.post("/api/chat", guard, async (req, res) => {
       { role: "user", content: opener },
       ...history.map((m) => ({ role: m.role, content: m.text })),
     ];
+    // 音声認識が出した別候補を、最後の発話に添えて文脈から選ばせる
+    const alts = Array.isArray(req.body?.alts)
+      ? req.body.alts
+          .filter((a) => typeof a === "string" && a.trim())
+          .slice(0, 3)
+          .map((a) => a.trim().slice(0, MAX_TEXT))
+      : [];
+    if (alts.length && history.length) {
+      messages.at(-1).content += `\n[Other candidates from the speech recognizer: ${alts.map((a) => JSON.stringify(a)).join(", ")}]`;
+    }
     if (history[0]?.role === "user") {
       messages.splice(1, 0, { role: "assistant", content: "(Go ahead.)" });
     }

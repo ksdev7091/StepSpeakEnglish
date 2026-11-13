@@ -138,12 +138,15 @@ function unlockSpeech() {
  * 聞き取りを始める。終わると onDone(text, failure) を一度だけ呼ぶ。
  * prefix を渡すと、その続きとして聞き取る。
  */
-function startRecognition({ lang, prefix = "", silenceMs, onInterim, onDone }) {
+function startRecognition({ lang, prefix = "", prefixAlts = [], silenceMs, onInterim, onDone }) {
   stopSpeaking();
   // Android の Chrome は continuous だと結果が重複するので単発で使う。単発だと少しの間で
   // ブラウザが聞き取りを打ち切るため、待ち時間が残っているうちは自動で聞き取りを再開する
   const restartable = /Android/i.test(navigator.userAgent);
   let base = prefix;
+  // 認識エンジンが出した第2・第3候補。文脈から正しいほうを選べるようAIに渡す
+  let baseAlts = [prefixAlts[0] ?? prefix, prefixAlts[1] ?? prefix];
+  let curAlts = [];
   let transcript = "";
   let failure = "";
   let finished = false;
@@ -151,7 +154,9 @@ function startRecognition({ lang, prefix = "", silenceMs, onInterim, onDone }) {
   let restarts = 0;
   let silence;
   let rec;
-  const joined = () => `${base} ${transcript}`.replace(/\s+/g, " ").trim();
+  const clean = (text) => text.replace(/\s+/g, " ").trim();
+  const joined = () => clean(`${base} ${transcript}`);
+  const joinedAlts = () => baseAlts.map((b, i) => clean(`${b} ${curAlts[i] ?? transcript}`));
 
   const session = {
     stop() {
@@ -176,15 +181,20 @@ function startRecognition({ lang, prefix = "", silenceMs, onInterim, onDone }) {
     finished = true;
     clearTimeout(silence);
     if (recognition === session) recognition = null;
-    onDone(joined(), failure);
+    const text = joined();
+    const alts = [...new Set(joinedAlts())].filter((a) => a && a !== text);
+    onDone(text, failure, alts);
   };
   const begin = () => {
     rec = new Recognition();
     rec.lang = lang;
     rec.interimResults = true;
     rec.continuous = !restartable;
+    rec.maxAlternatives = 3;
     rec.onresult = (event) => {
-      transcript = Array.from(event.results, (r) => r[0].transcript).join(" ");
+      const results = Array.from(event.results);
+      transcript = results.map((r) => r[0].transcript).join(" ");
+      curAlts = [1, 2].map((k) => results.map((r) => (r[k] || r[0]).transcript).join(" "));
       onInterim(joined());
       armSilence(silenceMs);
     };
@@ -201,8 +211,10 @@ function startRecognition({ lang, prefix = "", silenceMs, onInterim, onDone }) {
       if (finished) return;
       if (restartable && !stopping && !failure && restarts < 20) {
         restarts++;
+        baseAlts = joinedAlts();
         base = joined();
         transcript = "";
+        curAlts = [];
         try {
           return begin();
         } catch {
@@ -251,7 +263,7 @@ async function post(url, body) {
   return data;
 }
 
-function listen(lang, prefix = "") {
+function listen(lang, prefix = "", prefixAlts = []) {
   if (!canListen) return;
   clearPending();
   hideHints();
@@ -261,10 +273,11 @@ function listen(lang, prefix = "") {
   startRecognition({
     lang,
     prefix,
+    prefixAlts,
     silenceMs: SILENCE_MS[settings.level - 1] ?? 3000,
     onInterim: (text) => setStatus(text, "heard"),
-    onDone: (text, failure) => {
-      if (text) return confirmHeard(text, lang);
+    onDone: (text, failure, alts) => {
+      if (text) return confirmHeard(text, lang, alts);
       setMode("idle");
       setStatus(failure || "聞き取れませんでした。マイクをタップしてもう一度どうぞ。", failure ? "error" : "");
     },
@@ -272,10 +285,29 @@ function listen(lang, prefix = "") {
 }
 
 /** 聞き取った文を見せ、少し待ってから送る。その間に言い直しや言い足しができる */
-function confirmHeard(text, lang) {
-  pending = { text, lang };
+function confirmHeard(text, lang, alts = []) {
+  pending = { text, lang, alts };
   setMode("confirm");
   setStatus(text, "heard");
+  $("status").append(
+    " ",
+    el(
+      "button",
+      {
+        class: "link",
+        type: "button",
+        onclick: () => {
+          const p = clearPending();
+          if (!p) return;
+          setMode("idle");
+          setStatus("入力欄で直してから送信してください");
+          $("type-input").value = p.text;
+          $("type-input").focus();
+        },
+      },
+      "✏️ 直す",
+    ),
+  );
   confirmTimer = setTimeout(sendPending, CONFIRM_MS);
 }
 
@@ -288,11 +320,12 @@ function clearPending() {
 
 function sendPending() {
   const p = clearPending();
-  if (p) sendUserText(p.text);
+  if (p) sendUserText(p.text, p.alts);
 }
 
-function sendUserText(text) {
-  messages.push({ role: "user", text });
+function sendUserText(text, alts = null) {
+  // alts が null なら文字入力。音声のときだけ、AIによる聞き間違いの補正を受け入れる
+  messages.push({ role: "user", text, alts });
   stats.turns++;
   const today = dayString();
   if (!stats.days.includes(today)) stats.days = [...stats.days, today].slice(-400);
@@ -312,6 +345,7 @@ async function requestTurn() {
       level: settings.level,
       scenario: scenario.id,
       focus,
+      alts: messages.at(-1)?.alts || [],
       messages: messages.map(({ role, text }) => ({ role, text })),
     });
   } catch (error) {
@@ -325,6 +359,12 @@ async function requestTurn() {
 
   const last = messages.at(-1);
   if (last?.role === "user") {
+    // 文脈から聞き間違いと判断された語を直す。日本語の発話(正規化すると空)は対象外
+    const heard = typeof data.heard === "string" ? data.heard.trim() : "";
+    if (last.alts && heard && normalize(last.text) && normalize(heard) !== normalize(last.text)) {
+      last.original = last.text;
+      last.text = heard.slice(0, 600);
+    }
     last.feedback = data.feedback;
     if (data.feedback && !data.feedback.ok && data.feedback.better) {
       addNote({ en: data.feedback.better, ja: data.feedback.note_ja, said: last.text });
@@ -495,7 +535,13 @@ function renderMessage(m) {
         el("button", { class: "link", type: "button", onclick: () => sayExample(f.better) }, "🔊 お手本を聞く"),
     );
   }
-  return el("div", { class: "msg me" }, el("p", { class: "en" }, m.text), feedback);
+  return el(
+    "div",
+    { class: "msg me" },
+    el("p", { class: "en" }, m.text),
+    m.original && el("p", { class: "ja" }, `音声認識の結果: ${m.original}`),
+    feedback,
+  );
 }
 
 function renderLog(scroll = true) {
@@ -788,7 +834,7 @@ function practiceListen() {
       practice.message = text;
       renderCard();
     },
-    onDone: (text, failure) => {
+    onDone: (text, failure, alts) => {
       setMode("idle");
       if (!practice) return;
       if (!text) {
@@ -797,7 +843,8 @@ function practiceListen() {
       }
       practice.message = "";
       practice.heard = text;
-      practice.match = saidIt(text, practice.queue[0].en);
+      // 別候補のどれかが合っていれば、聞き間違いとみなして言えたことにする
+      practice.match = [text, ...alts].some((t) => saidIt(t, practice.queue[0].en));
       reveal();
     },
   });
@@ -886,7 +933,7 @@ $("redo-btn").addEventListener("click", () => {
 
 $("more-btn").addEventListener("click", () => {
   const p = clearPending();
-  if (p) listen(p.lang, p.text);
+  if (p) listen(p.lang, p.text, p.alts);
 });
 
 $("hint-btn").addEventListener("click", () => {
