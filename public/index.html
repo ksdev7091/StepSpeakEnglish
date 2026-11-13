@@ -38,10 +38,13 @@
     <section>
       <h2>レベル</h2>
       <div id="levels" class="levels" role="radiogroup" aria-label="レベル"></div>
+      <p class="tip">迷ったら Step 2 から。高校で英語を習った人は Step 2〜3 が目安です。</p>
     </section>
 
+    <section id="practice-entry" hidden></section>
+
     <section>
-      <h2>シーンを選んで会話スタート</h2>
+      <h2>シーンを選んで会話スタート <span id="level-progress"></span></h2>
       <div id="scenarios" class="scenarios"></div>
     </section>
 
@@ -69,16 +72,21 @@
       </label>
     </div>
 
+    <ul id="goals" class="goals" aria-label="このシーンのミッション"></ul>
+
     <div id="log" class="log" aria-live="polite"></div>
 
     <footer class="dock">
       <div id="hints" class="hints" hidden></div>
       <p id="status" class="status"></p>
+      <div id="countdown" class="countdown" hidden><span></span></div>
       <div class="controls">
         <button id="hint-btn" class="side" type="button" disabled>💡<span>ヒント</span></button>
+        <button id="redo-btn" class="side" type="button" hidden>🔁<span>言い直す</span></button>
         <button id="mic" class="mic" type="button" disabled aria-label="話す">
-          <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path fill="currentColor" d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-6a3.5 3.5 0 0 0-7 0v6A3.5 3.5 0 0 0 12 15Zm6-3.5a1 1 0 1 0-2 0 4 4 0 0 1-8 0 1 1 0 1 0-2 0 6 6 0 0 0 5 5.91V20H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-2.59a6 6 0 0 0 5-5.91Z"/></svg>
+          <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path class="i-mic" fill="currentColor" d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-6a3.5 3.5 0 0 0-7 0v6A3.5 3.5 0 0 0 12 15Zm6-3.5a1 1 0 1 0-2 0 4 4 0 0 1-8 0 1 1 0 1 0-2 0 6 6 0 0 0 5 5.91V20H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-2.59a6 6 0 0 0 5-5.91Z"/><path class="i-send" fill="currentColor" d="M9.5 16.2 5.3 12l-1.4 1.4 5.6 5.6 11-11-1.4-1.4z"/></svg>
         </button>
+        <button id="more-btn" class="side" type="button" hidden>➕<span>続きを話す</span></button>
         <button id="ja-btn" class="side" type="button" disabled>🇯🇵<span>日本語で言う</span></button>
       </div>
       <form id="type-form" class="type-form">
@@ -86,6 +94,16 @@
         <button type="submit">送信</button>
       </form>
     </footer>
+  </main>
+
+  <!-- 復習 -->
+  <main id="practice" class="screen" hidden>
+    <header class="bar plain">
+      <button id="practice-end" class="ghost" type="button">おわる</button>
+      <div id="practice-title" class="bar-title">復習</div>
+      <span></span>
+    </header>
+    <div id="practice-body"></div>
   </main>
 
   <!-- ふりかえり -->

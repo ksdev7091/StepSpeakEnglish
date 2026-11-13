@@ -4,13 +4,20 @@ const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 const canListen = Boolean(Recognition);
 const canSpeak = "speechSynthesis" in window;
 
+// 話し終わったとみなすまでの無音時間。初心者ほど文を考える間が長いので余裕を持たせる
+const SILENCE_MS = [4000, 3500, 3000, 2600, 2200];
+const CONFIRM_MS = 3500; // style.css の .countdown と合わせる
+// 復習の間隔(日)。言えるたびに次の間隔へ進む
+const INTERVALS = [1, 3, 7, 14, 30];
+const NOTEBOOK_MAX = 300;
+
 // ---- 保存データ ----------------------------------------------------------
 
-function load(key, fallback) {
+function read(key) {
   try {
-    return { ...fallback, ...JSON.parse(localStorage.getItem(key)) };
+    return JSON.parse(localStorage.getItem(key));
   } catch {
-    return fallback;
+    return null;
   }
 }
 
@@ -22,8 +29,46 @@ function save(key, value) {
   }
 }
 
-const settings = load("sse-settings", { level: 2, showText: !canSpeak, handsFree: false, rate: 0.85 });
-const stats = load("sse-stats", { turns: 0, sessions: 0, days: [] });
+const settings = { level: 2, showText: null, handsFree: false, rate: 0.85, ...read("sse-settings") };
+const stats = { turns: 0, sessions: 0, days: [], cleared: {}, ...read("sse-stats") };
+// 復習リスト: { en, ja, said?, box, due }
+let notebook = Array.isArray(read("sse-notebook")) ? read("sse-notebook") : [];
+
+function dayString(offset = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return d.toLocaleDateString("sv");
+}
+
+function normalize(text) {
+  return text
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .replace(/[^a-z0-9' ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** 直された表現や覚えたいフレーズを復習リストに入れる。追加できたら true */
+function addNote({ en, ja, said }) {
+  const key = normalize(en || "");
+  if (!key || notebook.some((n) => normalize(n.en) === key)) return false;
+  notebook.push({ en, ja: ja || "", said: said || "", box: 0, due: dayString(1) });
+  notebook = notebook.slice(-NOTEBOOK_MAX);
+  save("sse-notebook", notebook);
+  return true;
+}
+
+function dueNotes() {
+  const today = dayString();
+  return notebook.filter((n) => n.due <= today);
+}
+
+/** 文字を表示するかどうか。本人が設定していなければ Step 1〜2 だけ最初から表示する */
+function showTextByDefault() {
+  if (!canSpeak) return true;
+  return settings.showText ?? settings.level <= 2;
+}
 
 // ---- 状態 ----------------------------------------------------------------
 
@@ -31,10 +76,15 @@ let config = { levels: [], scenarios: [] };
 let scenario = null;
 let messages = []; // { role, text, ja?, feedback?, shown?, jaShown? }
 let hints = [];
-let mode = "idle"; // idle | listening | thinking | speaking
+let goalsDone = new Set();
+let focus = [];
+let mode = "idle"; // idle | listening | confirm | thinking | speaking
+let pending = null; // 送信待ちの聞き取り結果 { text, lang }
+let confirmTimer;
 let recognition = null;
 let speakToken = 0;
 let retry = null;
+let practice = null; // { queue, retried, heard, match, revealed }
 
 // ---- 音声 ----------------------------------------------------------------
 
@@ -84,10 +134,12 @@ function unlockSpeech() {
   speechSynthesis.speak(u);
 }
 
-function listen(lang) {
-  if (!canListen) return;
+/**
+ * 聞き取りを始める。終わると onDone(text, failure) を一度だけ呼ぶ。
+ * prefix を渡すと、その続きとして聞き取る。
+ */
+function startRecognition({ lang, prefix = "", silenceMs, onInterim, onDone }) {
   stopSpeaking();
-  hideHints();
   const rec = new Recognition();
   recognition = rec;
   rec.lang = lang;
@@ -98,6 +150,7 @@ function listen(lang) {
   let transcript = "";
   let failure = "";
   let silence;
+  const joined = () => `${prefix} ${transcript}`.replace(/\s+/g, " ").trim();
   const armSilence = (ms) => {
     clearTimeout(silence);
     silence = setTimeout(() => rec.stop(), ms);
@@ -105,8 +158,8 @@ function listen(lang) {
 
   rec.onresult = (event) => {
     transcript = Array.from(event.results, (r) => r[0].transcript).join(" ");
-    setStatus(transcript, "heard");
-    armSilence(2200);
+    onInterim(joined());
+    armSilence(silenceMs);
   };
   rec.onerror = (event) => {
     if (event.error === "not-allowed" || event.error === "service-not-allowed") {
@@ -119,24 +172,15 @@ function listen(lang) {
     clearTimeout(silence);
     if (recognition !== rec) return;
     recognition = null;
-    const text = transcript.replace(/\s+/g, " ").trim();
-    if (text) {
-      sendUserText(text);
-    } else {
-      setMode("idle");
-      setStatus(failure || "聞き取れませんでした。マイクをタップしてもう一度どうぞ。", failure ? "error" : "");
-    }
+    onDone(joined(), failure);
   };
 
-  setMode("listening");
-  setStatus(lang === "ja-JP" ? "日本語でどうぞ。英語での言い方を教えます。" : "どうぞ、話してください…");
   try {
     rec.start();
-    armSilence(10000);
+    armSilence(12000);
   } catch {
     recognition = null;
-    setMode("idle");
-    setStatus("マイクを開始できませんでした。", "error");
+    onDone(prefix, "マイクを開始できませんでした。");
   }
 }
 
@@ -168,10 +212,50 @@ async function post(url, body) {
   return data;
 }
 
+function listen(lang, prefix = "") {
+  if (!canListen) return;
+  clearPending();
+  hideHints();
+  setMode("listening");
+  if (prefix) setStatus(prefix, "heard");
+  else setStatus(lang === "ja-JP" ? "日本語でどうぞ。英語での言い方を教えます。" : "どうぞ、話してください…");
+  startRecognition({
+    lang,
+    prefix,
+    silenceMs: SILENCE_MS[settings.level - 1] ?? 3000,
+    onInterim: (text) => setStatus(text, "heard"),
+    onDone: (text, failure) => {
+      if (text) return confirmHeard(text, lang);
+      setMode("idle");
+      setStatus(failure || "聞き取れませんでした。マイクをタップしてもう一度どうぞ。", failure ? "error" : "");
+    },
+  });
+}
+
+/** 聞き取った文を見せ、少し待ってから送る。その間に言い直しや言い足しができる */
+function confirmHeard(text, lang) {
+  pending = { text, lang };
+  setMode("confirm");
+  setStatus(text, "heard");
+  confirmTimer = setTimeout(sendPending, CONFIRM_MS);
+}
+
+function clearPending() {
+  clearTimeout(confirmTimer);
+  const p = pending;
+  pending = null;
+  return p;
+}
+
+function sendPending() {
+  const p = clearPending();
+  if (p) sendUserText(p.text);
+}
+
 function sendUserText(text) {
   messages.push({ role: "user", text });
   stats.turns++;
-  const today = new Date().toLocaleDateString("sv");
+  const today = dayString();
   if (!stats.days.includes(today)) stats.days = [...stats.days, today].slice(-400);
   save("sse-stats", stats);
   renderLog();
@@ -188,6 +272,7 @@ async function requestTurn() {
     data = await post("/api/chat", {
       level: settings.level,
       scenario: scenario.id,
+      focus,
       messages: messages.map(({ role, text }) => ({ role, text })),
     });
   } catch (error) {
@@ -200,8 +285,22 @@ async function requestTurn() {
   if (scenario !== session) return;
 
   const last = messages.at(-1);
-  if (last?.role === "user") last.feedback = data.feedback;
-  const reply = { role: "assistant", text: data.reply, ja: data.reply_ja, shown: settings.showText || !canSpeak };
+  if (last?.role === "user") {
+    last.feedback = data.feedback;
+    if (data.feedback && !data.feedback.ok && data.feedback.better) {
+      addNote({ en: data.feedback.better, ja: data.feedback.note_ja, said: last.text });
+    }
+  }
+  for (const i of data.goals_done || []) {
+    if (Number.isInteger(i) && i >= 0 && i < scenario.goals.length) goalsDone.add(i);
+  }
+  if (goalsDone.size === scenario.goals.length) {
+    stats.cleared[`${scenario.id}:${settings.level}`] = true;
+    save("sse-stats", stats);
+  }
+  renderGoals();
+
+  const reply = { role: "assistant", text: data.reply, ja: data.reply_ja, shown: showTextByDefault() };
   messages.push(reply);
   hints = data.hints || [];
   renderLog();
@@ -210,6 +309,7 @@ async function requestTurn() {
 
 /** 相手のセリフを読み上げ、終わったら聞き取りに戻る */
 async function say(text) {
+  clearPending();
   stopListening(true);
   stopSpeaking();
   const token = speakToken;
@@ -228,6 +328,7 @@ async function say(text) {
 /** ヒントや添削の例文を聞く(会話の進行は変えない) */
 async function sayExample(text) {
   if (mode === "listening") stopListening(true);
+  clearPending();
   stopSpeaking();
   if (mode !== "thinking") setMode("idle");
   await speak(text);
@@ -247,7 +348,7 @@ function el(tag, props = {}, ...children) {
 }
 
 function show(screen) {
-  for (const id of ["login", "home", "talk", "review"]) $(id).hidden = id !== screen;
+  for (const id of ["login", "home", "talk", "practice", "review"]) $(id).hidden = id !== screen;
   window.scrollTo(0, 0);
 }
 
@@ -255,8 +356,12 @@ function setMode(next) {
   mode = next;
   document.body.dataset.mode = next;
   const started = messages.some((m) => m.role === "assistant");
+  const confirming = next === "confirm";
   $("mic").disabled = !canListen || next === "thinking" || !scenario;
-  $("mic").setAttribute("aria-label", next === "listening" ? "話し終える" : "話す");
+  $("mic").setAttribute("aria-label", confirming ? "送信する" : next === "listening" ? "話し終える" : "話す");
+  $("hint-btn").hidden = $("ja-btn").hidden = confirming;
+  $("redo-btn").hidden = $("more-btn").hidden = !confirming;
+  $("countdown").hidden = !confirming;
   $("ja-btn").disabled = !canListen || next !== "idle" || !started;
   $("hint-btn").disabled = next === "thinking" || !hints.length;
   $("type-form").querySelector("button").disabled = next === "thinking" || !started;
@@ -281,6 +386,16 @@ function renderHints() {
     ...hints.map((hint) =>
       el("button", { class: "hint", type: "button", onclick: () => sayExample(hint) }, el("span", {}, "🔊"), hint),
     ),
+  );
+}
+
+function renderGoals() {
+  const all = scenario && goalsDone.size === scenario.goals.length;
+  $("goals").replaceChildren(
+    ...(scenario?.goals || []).map((goal, i) =>
+      el("li", { class: goalsDone.has(i) ? "done" : "" }, goalsDone.has(i) ? `✓ ${goal}` : goal),
+    ),
+    ...(all ? [el("li", { class: "clear" }, "🎉 ミッション達成!")] : []),
   );
 }
 
@@ -352,18 +467,23 @@ function renderLog(scroll = true) {
 
 function streak() {
   const days = new Set(stats.days);
-  const day = new Date();
   // 今日まだ練習していなくても、昨日までの連続は途切れていない
-  if (!days.has(day.toLocaleDateString("sv"))) day.setDate(day.getDate() - 1);
+  let offset = days.has(dayString()) ? 0 : -1;
   let count = 0;
-  while (days.has(day.toLocaleDateString("sv"))) {
+  while (days.has(dayString(offset))) {
     count++;
-    day.setDate(day.getDate() - 1);
+    offset--;
   }
   return count;
 }
 
+function levelName(id) {
+  return config.levels.find((l) => l.id === id)?.name ?? `Step ${id}`;
+}
+
 function renderHome() {
+  const cleared = (s) => Boolean(stats.cleared[`${s.id}:${settings.level}`]);
+
   $("levels").replaceChildren(
     ...config.levels.map((level) =>
       el(
@@ -385,6 +505,7 @@ function renderHome() {
       ),
     ),
   );
+
   $("scenarios").replaceChildren(
     ...config.scenarios.map((s) =>
       el(
@@ -392,8 +513,37 @@ function renderHome() {
         { class: "scenario", type: "button", onclick: () => startSession(s) },
         el("span", { class: "emoji", "aria-hidden": "true" }, s.emoji),
         el("span", {}, el("strong", {}, s.title), el("small", {}, s.desc)),
+        cleared(s) && el("span", { class: "badge" }, "✓ 達成"),
       ),
     ),
+  );
+
+  const done = config.scenarios.filter(cleared).length;
+  const total = config.scenarios.length;
+  const next = config.levels.find((l) => l.id === settings.level + 1);
+  $("level-progress").textContent =
+    done === total && total > 0
+      ? next
+        ? `全シーン達成!${next.name} に挑戦しよう`
+        : "全シーン達成!"
+      : `${levelName(settings.level)} のミッション達成 ${done}/${total}`;
+
+  const due = dueNotes().length;
+  $("practice-entry").hidden = !notebook.length;
+  $("practice-entry").replaceChildren(
+    due
+      ? el(
+          "button",
+          { class: "entry", type: "button", onclick: startPractice },
+          el("span", { class: "emoji", "aria-hidden": "true" }, "📒"),
+          el("span", {}, el("strong", {}, `今日の復習 ${due} 個`), el("small", {}, "前に直された表現を、声に出してもう一度")),
+        )
+      : el(
+          "div",
+          { class: "entry rest" },
+          el("span", { class: "emoji", "aria-hidden": "true" }, "📒"),
+          el("span", {}, `今日の復習はありません(保存した表現 ${notebook.length} 個)`),
+        ),
   );
 
   $("stats").hidden = !stats.turns;
@@ -411,19 +561,26 @@ function startSession(s) {
   scenario = s;
   messages = [];
   hints = [];
-  const level = config.levels.find((l) => l.id === settings.level);
-  $("talk-title").textContent = `${s.emoji} ${s.title} ・ ${level.name}`;
-  $("opt-text").checked = settings.showText;
+  goalsDone = new Set();
+  // 復習中の表現を会話の中でも使えるよう、相手役に伝えておく
+  focus = [...notebook]
+    .sort((a, b) => a.due.localeCompare(b.due))
+    .slice(0, 3)
+    .map((n) => n.en);
+  $("talk-title").textContent = `${s.emoji} ${s.title} ・ ${levelName(settings.level)}`;
+  $("opt-text").checked = showTextByDefault();
   $("opt-hands").checked = settings.handsFree;
   $("opt-rate").value = String(settings.rate);
   $("opt-hands").closest("label").hidden = !canListen;
   hideHints();
+  renderGoals();
   renderLog();
   show("talk");
   requestTurn();
 }
 
 function leaveSession() {
+  clearPending();
   stopListening(true);
   stopSpeaking();
   scenario = null;
@@ -433,6 +590,7 @@ function leaveSession() {
 
 async function endSession() {
   const transcript = messages.map(({ role, text }) => ({ role, text }));
+  const level = settings.level;
   leaveSession();
   if (!transcript.some((m) => m.role === "user")) {
     renderHome();
@@ -447,7 +605,7 @@ async function endSession() {
   const run = async () => {
     body.replaceChildren(el("p", { class: "loading" }, "会話をふりかえっています…"));
     try {
-      renderReview(await post("/api/review", { messages: transcript }));
+      renderReview(await post("/api/review", { level, messages: transcript }), level);
     } catch (error) {
       body.replaceChildren(
         el("p", { class: "status error" }, error.message),
@@ -458,9 +616,36 @@ async function endSession() {
   run();
 }
 
-function renderReview(r) {
+function renderReview(r, level) {
+  for (const i of r.improvements) addNote({ en: i.better, ja: i.note_ja, said: i.said });
+  for (const p of r.phrases) addNote({ en: p.en, ja: p.ja });
+
+  const step = r.level_advice === "up" ? 1 : r.level_advice === "down" ? -1 : 0;
+  const target = config.levels.find((l) => l.id === level + step && step !== 0);
+  const levelCard = el(
+    "section",
+    { class: "card" },
+    el("h2", {}, "次のレベル"),
+    el("p", {}, r.level_reason_ja),
+    target &&
+      el(
+        "button",
+        {
+          class: "primary",
+          type: "button",
+          onclick: (event) => {
+            settings.level = target.id;
+            save("sse-settings", settings);
+            event.currentTarget.disabled = true;
+            event.currentTarget.textContent = `次回から ${target.name}(${target.label})で始めます`;
+          },
+        },
+        `${target.name}(${target.label})に${step > 0 ? "上げる" : "下げる"}`,
+      ),
+  );
+
   const list = (items) => el("ul", {}, ...items.map((item) => el("li", {}, item)));
-  $("review-body").replaceChildren(
+  const sections = [
     el("section", { class: "card" }, el("p", {}, r.summary_ja)),
     el("section", { class: "card" }, el("h2", {}, "よかったところ"), list(r.strengths_ja)),
     r.improvements.length > 0 &&
@@ -496,19 +681,174 @@ function renderReview(r) {
           el("span", { class: "ja" }, p.ja),
         ),
       ),
+      el("p", { class: "tip" }, "直した表現とフレーズは復習リストに保存しました。明日からホームの「今日の復習」に出ます。"),
     ),
     el("section", { class: "card" }, el("h2", {}, "次回のポイント"), el("p", {}, r.next_step_ja)),
+    levelCard,
+  ];
+  $("review-body").replaceChildren(...sections.filter(Boolean));
+}
+
+// ---- 復習 ----------------------------------------------------------------
+
+function startPractice() {
+  unlockSpeech();
+  practice = { queue: dueNotes().slice(0, 10), retried: new Set() };
+  show("practice");
+  nextCard();
+}
+
+function nextCard() {
+  practice.heard = "";
+  practice.match = false;
+  practice.revealed = false;
+  practice.message = "";
+  renderCard();
+}
+
+/** 目標の文の単語がどれだけ言えているかで判定する(認識の揺れを許容するため完全一致は求めない) */
+function saidIt(heard, target) {
+  const said = new Set(normalize(heard).split(" "));
+  const words = normalize(target).split(" ");
+  return words.filter((w) => said.has(w)).length / words.length >= 0.8;
+}
+
+function reveal() {
+  practice.revealed = true;
+  renderCard();
+  speak(practice.queue[0].en);
+}
+
+function grade(ok) {
+  const item = practice.queue.shift();
+  if (ok) {
+    item.box = Math.min((item.box || 0) + 1, INTERVALS.length);
+    item.due = dayString(INTERVALS[item.box - 1]);
+  } else {
+    item.box = 0;
+    item.due = dayString();
+    // 言えなかった表現は、この回の最後にもう一度だけ出す
+    if (!practice.retried.has(item)) {
+      practice.retried.add(item);
+      practice.queue.push(item);
+    }
+  }
+  save("sse-notebook", notebook);
+  nextCard();
+}
+
+function practiceListen() {
+  if (mode === "listening") return stopListening();
+  practice.message = "どうぞ、話してください…";
+  setMode("listening");
+  renderCard();
+  startRecognition({
+    lang: "en-US",
+    silenceMs: 3000,
+    onInterim: (text) => {
+      practice.message = text;
+      renderCard();
+    },
+    onDone: (text, failure) => {
+      setMode("idle");
+      if (!practice) return;
+      if (!text) {
+        practice.message = failure || "聞き取れませんでした。もう一度どうぞ。";
+        return renderCard();
+      }
+      practice.message = "";
+      practice.heard = text;
+      practice.match = saidIt(text, practice.queue[0].en);
+      reveal();
+    },
+  });
+}
+
+function renderCard() {
+  const body = $("practice-body");
+  const item = practice.queue[0];
+  $("practice-title").textContent = item ? `復習 ・ 残り ${practice.queue.length}` : "復習";
+  if (!item) {
+    body.replaceChildren(
+      el("section", { class: "card center" }, el("p", { class: "prompt" }, "🎉 今日の復習はおわり!"), el("p", { class: "ja" }, "言えた表現は、日をあけてまた出てきます。")),
+      el("button", { class: "primary", type: "button", onclick: leavePractice }, "ホームに戻る"),
+    );
+    return;
+  }
+
+  const card = el(
+    "section",
+    { class: "card" },
+    el("p", { class: "prompt-label" }, item.said ? "前にこう言いました。もっと自然に言うと?" : "英語で言ってみよう"),
+    el("p", { class: "prompt" }, item.said || item.ja),
+    practice.heard && el("p", { class: "ja" }, `あなた: ${practice.heard}`),
+    practice.revealed &&
+      el(
+        "div",
+        { class: "answer" },
+        el("p", { class: "en" }, item.en),
+        item.ja && el("p", { class: "ja" }, item.ja),
+        canSpeak && el("button", { class: "link", type: "button", onclick: () => speak(item.en) }, "🔊 お手本を聞く"),
+        practice.heard &&
+          el(
+            "p",
+            { class: `verdict ${practice.match ? "good" : "near"}` },
+            practice.match ? "✓ 言えました!" : "お手本と少し違うようです。聞いて、もう一度声に出してみよう。",
+          ),
+      ),
   );
+
+  const controls = el(
+    "div",
+    { class: "practice-controls" },
+    el("p", { class: "status heard" }, practice.message),
+    canListen &&
+      el(
+        "button",
+        { class: "mic", type: "button", "aria-label": mode === "listening" ? "話し終える" : "話す", onclick: practiceListen },
+        $("mic").querySelector("svg").cloneNode(true),
+      ),
+    practice.revealed
+      ? el(
+          "div",
+          { class: "grade" },
+          el("button", { type: "button", onclick: () => grade(false) }, "まだ"),
+          el("button", { class: "yes", type: "button", onclick: () => grade(true) }, "言えた"),
+        )
+      : el("button", { class: "link", type: "button", onclick: reveal }, "答えを見る"),
+  );
+
+  body.replaceChildren(card, controls);
+}
+
+function leavePractice() {
+  stopListening(true);
+  stopSpeaking();
+  practice = null;
+  setMode("idle");
+  renderHome();
+  show("home");
 }
 
 // ---- イベント ------------------------------------------------------------
 
 $("mic").addEventListener("click", () => {
   if (mode === "listening") stopListening();
+  else if (mode === "confirm") sendPending();
   else if (mode !== "thinking") listen("en-US");
 });
 
 $("ja-btn").addEventListener("click", () => listen("ja-JP"));
+
+$("redo-btn").addEventListener("click", () => {
+  const p = clearPending();
+  if (p) listen(p.lang);
+});
+
+$("more-btn").addEventListener("click", () => {
+  const p = clearPending();
+  if (p) listen(p.lang, p.text);
+});
 
 $("hint-btn").addEventListener("click", () => {
   if ($("hints").hidden) renderHints();
@@ -521,6 +861,7 @@ $("type-form").addEventListener("submit", (event) => {
   const text = input.value.trim();
   if (!text || mode === "thinking") return;
   input.value = "";
+  clearPending();
   stopListening(true);
   stopSpeaking();
   hideHints();
@@ -528,6 +869,7 @@ $("type-form").addEventListener("submit", (event) => {
 });
 
 $("end").addEventListener("click", endSession);
+$("practice-end").addEventListener("click", leavePractice);
 
 $("review-home").addEventListener("click", () => {
   stopSpeaking();

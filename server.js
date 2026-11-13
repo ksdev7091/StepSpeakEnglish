@@ -12,7 +12,8 @@ const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
 
 // 会話はテンポが大事なので、深く考えさせず短く返させる
 const EFFORT = "low";
-const MAX_TURNS = 80;
+// モデルに渡す会話履歴の上限。超えた分は古いものから省く
+const MAX_TURNS = 60;
 const MAX_TEXT = 600;
 
 // 公開時の合言葉。設定すると、合言葉を知っている人だけが会話できる
@@ -70,6 +71,7 @@ const LEVELS = [
 const SCENARIOS = [
   {
     id: "free",
+    goals: ["今日したことを話す", "好きなものとその理由を話す", "相手に質問を1つする"],
     emoji: "💬",
     title: "フリートーク",
     desc: "今日あったことや趣味を気軽に",
@@ -77,6 +79,7 @@ const SCENARIOS = [
   },
   {
     id: "intro",
+    goals: ["名前と出身を伝える", "仕事や学校について話す", "相手に質問を1つする"],
     emoji: "👋",
     title: "自己紹介",
     desc: "はじめて会う人との会話",
@@ -84,6 +87,7 @@ const SCENARIOS = [
   },
   {
     id: "cafe",
+    goals: ["飲み物を注文する", "サイズを伝える", "店内か持ち帰りかを伝える"],
     emoji: "☕",
     title: "カフェで注文",
     desc: "店員さんとのやりとり",
@@ -91,6 +95,7 @@ const SCENARIOS = [
   },
   {
     id: "restaurant",
+    goals: ["人数を伝えて席に着く", "料理と飲み物を注文する", "お会計を頼む"],
     emoji: "🍽️",
     title: "レストラン",
     desc: "入店から会計まで",
@@ -98,6 +103,7 @@ const SCENARIOS = [
   },
   {
     id: "travel",
+    goals: ["チェックインして名前を伝える", "朝食やWi-Fiなど設備について質問する", "行きたい場所への行き方をたずねる"],
     emoji: "✈️",
     title: "海外旅行",
     desc: "空港・ホテル・道案内",
@@ -105,6 +111,7 @@ const SCENARIOS = [
   },
   {
     id: "shopping",
+    goals: ["探している物を伝える", "サイズか色について相談する", "買うかどうかを伝える"],
     emoji: "🛍️",
     title: "ショッピング",
     desc: "服のサイズや色を相談",
@@ -112,6 +119,7 @@ const SCENARIOS = [
   },
   {
     id: "work",
+    goals: ["仕事の進み具合を伝える", "予定や締め切りについて話す", "自分の意見を理由つきで言う"],
     emoji: "💼",
     title: "仕事の会話",
     desc: "同僚との雑談とミーティング",
@@ -119,6 +127,7 @@ const SCENARIOS = [
   },
   {
     id: "interview",
+    goals: ["自己紹介をする", "自分の強みを話す", "面接官に質問を1つする"],
     emoji: "🎤",
     title: "英語面接",
     desc: "よく聞かれる質問に答える",
@@ -126,12 +135,24 @@ const SCENARIOS = [
   },
 ];
 
-function systemPrompt(level, scenario) {
+function systemPrompt(level, scenario, focus) {
+  const goals = scenario.goals.map((g, i) => `${i}: ${g}`).join("\n");
+  const focusNote = focus.length
+    ? `
+
+The learner is reviewing these expressions from earlier sessions:
+${focus.map((f) => `- ${f}`).join("\n")}
+Where it fits the scenario naturally, steer the conversation so they get a chance to use one. Do not say the expressions yourself first, and do not force them in where they do not belong.`
+    : "";
   return `You are an English conversation partner for a native Japanese speaker who wants to become able to speak English. The whole conversation happens by voice: each learner message is a speech-recognition transcript, and your "reply" is read aloud by text-to-speech. The app shows the other fields on screen as study aids.
 
 Scenario: ${scenario.role}
 
 Learner level: ${level.guide}
+
+Mission goals for the learner in this scene (the app shows them as a checklist):
+${goals}
+Guide the conversation so each goal gets a natural opening, without announcing the goals.${focusNote}
 
 reply — what you say aloud, in character.
 - Plain spoken English only: no markdown, emoji, lists or stage directions, because every character is spoken.
@@ -150,7 +171,9 @@ feedback — about the learner's most recent utterance only.
 - better: when ok is false, the corrected or more natural English sentence. Empty string when ok is true.
 - note_ja: one or two short Japanese sentences. When ok is false, explain why "better" is better. When ok is true, say something specific about what worked. For the opening turn, where the learner has not spoken yet, use an empty string.
 
-hints — exactly two short things the learner could say next, at their level, written in English. They are shown only when the learner asks for help.`;
+hints — exactly two short things the learner could say next, at their level, written in English. They are shown only when the learner asks for help.
+
+goals_done — the numbers of every mission goal the learner has achieved so far in this conversation through what they themselves said in English, however imperfectly. Cumulative: keep listing goals achieved in earlier turns.`;
 }
 
 const TurnSchema = z.object({
@@ -162,6 +185,7 @@ const TurnSchema = z.object({
     note_ja: z.string(),
   }),
   hints: z.array(z.string()),
+  goals_done: z.array(z.number()),
 });
 
 const ReviewSchema = z.object({
@@ -172,6 +196,8 @@ const ReviewSchema = z.object({
   ),
   phrases: z.array(z.object({ en: z.string(), ja: z.string() })),
   next_step_ja: z.string(),
+  level_advice: z.enum(["up", "stay", "down"]),
+  level_reason_ja: z.string(),
 });
 
 const REVIEW_PROMPT = `You are an English speaking coach for a native Japanese speaker. Below is the transcript of a spoken practice conversation. Learner lines are speech-recognition transcripts, so ignore punctuation, capitalisation and obvious recognition mistakes.
@@ -181,14 +207,15 @@ Write a short review of the learner's speaking, in Japanese except where English
 - strengths_ja: two or three specific things the learner did well, quoting what they said where you can.
 - improvements: up to four of the most useful corrections. "said" is what the learner said, "better" is the natural English, "note_ja" is a one-sentence explanation. Pick recurring or high-impact patterns over one-off slips. Use an empty array if there is nothing worth correcting.
 - phrases: three to five useful English phrases from this conversation's situation that the learner should try next time, each with a Japanese meaning.
-- next_step_ja: one concrete thing to focus on in the next session.`;
+- next_step_ja: one concrete thing to focus on in the next session.
+- level_advice: whether the learner should change difficulty next time. "up" when they kept up comfortably, answered in full sentences and made few errors; "down" when they struggled to answer most turns or mostly fell back on Japanese or single words; otherwise "stay". With fewer than about five learner turns there is too little evidence, so answer "stay".
+- level_reason_ja: one sentence explaining that advice.`;
 
 /** クライアントから届いた会話履歴を検証して整える */
 function cleanHistory(raw) {
   if (!Array.isArray(raw)) return null;
-  if (raw.length > MAX_TURNS) return null;
   const out = [];
-  for (const m of raw) {
+  for (const m of raw.slice(-MAX_TURNS)) {
     if (!m || (m.role !== "user" && m.role !== "assistant")) return null;
     if (typeof m.text !== "string") return null;
     const text = m.text.trim().slice(0, MAX_TEXT);
@@ -318,7 +345,7 @@ app.get("/api/config", (req, res) => {
   res.json({
     needLogin: !isAuthed(req),
     levels: LEVELS.map(({ id, name, label, desc }) => ({ id, name, label, desc })),
-    scenarios: SCENARIOS.map(({ id, emoji, title, desc }) => ({ id, emoji, title, desc })),
+    scenarios: SCENARIOS.map(({ id, emoji, title, desc, goals }) => ({ id, emoji, title, desc, goals })),
   });
 });
 
@@ -332,16 +359,27 @@ app.post("/api/chat", guard, async (req, res) => {
       throw new HttpError(400, "リクエストが正しくありません。");
     }
 
+    const focus = Array.isArray(req.body?.focus)
+      ? req.body.focus
+          .filter((f) => typeof f === "string" && f.trim())
+          .slice(0, 3)
+          .map((f) => f.trim().slice(0, 160))
+      : [];
+
     // APIは最初がuserである必要があるので、AIから話し始めるための合図を先頭に置く
+    const trimmed = req.body.messages.length > history.length;
+    const opener = trimmed
+      ? "(The earlier part of this conversation has been omitted. Continue from here.)"
+      : "(The learner has just arrived. Start the conversation.)";
     const messages = [
-      { role: "user", content: "(The learner has just arrived. Start the conversation.)" },
+      { role: "user", content: opener },
       ...history.map((m) => ({ role: m.role, content: m.text })),
     ];
     if (history[0]?.role === "user") {
       messages.splice(1, 0, { role: "assistant", content: "(Go ahead.)" });
     }
 
-    res.json(await ask({ system: systemPrompt(level, scenario), messages, schema: TurnSchema }));
+    res.json(await ask({ system: systemPrompt(level, scenario, focus), messages, schema: TurnSchema }));
   } catch (error) {
     const e = toHttpError(error);
     res.status(e.status).json({ error: e.message });
@@ -354,9 +392,10 @@ app.post("/api/review", guard, async (req, res) => {
     if (!history || !history.some((m) => m.role === "user")) {
       throw new HttpError(400, "ふりかえる会話がありません。");
     }
-    const transcript = history
-      .map((m) => `${m.role === "user" ? "Learner" : "Partner"}: ${m.text}`)
-      .join("\n");
+    const level = LEVELS.find((l) => l.id === req.body?.level);
+    const transcript =
+      (level ? `The partner was speaking at this difficulty: ${level.guide}\n\n` : "") +
+      history.map((m) => `${m.role === "user" ? "Learner" : "Partner"}: ${m.text}`).join("\n");
     res.json(
       await ask({
         system: REVIEW_PROMPT,

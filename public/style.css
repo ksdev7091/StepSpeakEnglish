@@ -211,3 +211,52 @@ body[data-mode="speaking"] .mic { opacity: .75; }
   border: 1.5px solid var(--line); background: var(--surface);
 }
 .login-form .status { margin-top: 8px; }
+
+/* ステップアップ */
+.tip { margin-top: 8px; font-size: .82rem; color: var(--muted); }
+#level-progress { display: block; font-weight: 400; font-size: .82rem; }
+.scenario { position: relative; }
+.badge {
+  margin-left: auto; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+  background: var(--good-soft); color: var(--good); font-size: .75rem; font-weight: 600;
+}
+.entry {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  margin-top: 20px; padding: 14px 16px; border-radius: 14px;
+  background: var(--accent-soft); border: 1.5px solid var(--accent);
+}
+.entry.rest { background: var(--surface); border-color: var(--line); color: var(--muted); }
+.entry strong { display: block; color: var(--ink); }
+.entry small { color: var(--muted); }
+
+.goals {
+  list-style: none; margin: 0; padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 6px;
+  border-bottom: 1px solid var(--line); font-size: .78rem;
+}
+.goals li { padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.goals li.done { background: var(--good-soft); border-color: transparent; color: var(--good); font-weight: 600; }
+.goals li.clear { border: 0; color: var(--good); font-weight: 700; }
+
+/* 送信前の確認 */
+.mic .i-send { display: none; }
+body[data-mode="confirm"] .mic { background: var(--good); box-shadow: none; }
+body[data-mode="confirm"] .mic .i-mic { display: none; }
+body[data-mode="confirm"] .mic .i-send { display: block; }
+.countdown { height: 3px; margin: 6px auto 0; max-width: 220px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.countdown span { display: block; height: 100%; background: var(--good); animation: drain 3.5s linear forwards; }
+@keyframes drain { from { width: 100%; } to { width: 0; } }
+
+/* 復習 */
+.bar.plain { border: 0; padding: 0 0 12px; }
+.prompt { font-size: 1.15rem; font-weight: 600; }
+.prompt-label { font-size: .8rem; color: var(--muted); margin-bottom: 4px; }
+.answer { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.answer .en { font-weight: 700; font-size: 1.15rem; }
+.verdict { margin-top: 12px; font-size: .92rem; }
+.verdict.good { color: var(--good); }
+.verdict.near { color: var(--fix); }
+.practice-controls { display: grid; justify-items: center; gap: 10px; margin-top: 24px; }
+.grade { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
+.grade button { padding: 12px; border-radius: 10px; border: 1.5px solid var(--line); background: var(--surface); font-weight: 600; }
+.grade .yes { border-color: var(--good); color: var(--good); }
+.center { text-align: center; }
