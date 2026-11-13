@@ -1,0 +1,14 @@
+{
+  "name": "StepSpeak English",
+  "short_name": "StepSpeak",
+  "description": "AIと声で会話しながら英語を練習",
+  "lang": "ja",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f4ef",
+  "theme_color": "#1f6feb",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

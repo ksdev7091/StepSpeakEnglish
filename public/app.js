@@ -160,6 +160,10 @@ async function post(url, body) {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
+  if (data.needLogin) {
+    leaveSession();
+    show("login");
+  }
   if (!res.ok) throw new Error(data.error || "通信エラーが起きました。");
   return data;
 }
@@ -243,7 +247,7 @@ function el(tag, props = {}, ...children) {
 }
 
 function show(screen) {
-  for (const id of ["home", "talk", "review"]) $(id).hidden = id !== screen;
+  for (const id of ["login", "home", "talk", "review"]) $(id).hidden = id !== screen;
   window.scrollTo(0, 0);
 }
 
@@ -550,15 +554,33 @@ $("opt-rate").addEventListener("change", (e) => {
   save("sse-settings", settings);
 });
 
+$("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("login-error").textContent = "";
+  try {
+    await post("/api/login", { password: $("login-input").value });
+    $("login-input").value = "";
+    await init();
+  } catch (error) {
+    $("login-error").textContent = error.message;
+  }
+});
+
 // 音声一覧は非同期に読み込まれるので、先に取得を促しておく
 if (canSpeak) speechSynthesis.getVoices();
 
-try {
-  const res = await fetch("/api/config");
-  config = await res.json();
-  if (!config.levels.some((l) => l.id === settings.level)) settings.level = 2;
-  renderHome();
-} catch {
-  $("support-note").hidden = false;
-  $("support-note").textContent = "サーバーに接続できませんでした。ページを再読み込みしてください。";
+async function init() {
+  try {
+    const res = await fetch("/api/config");
+    config = await res.json();
+    if (!config.levels.some((l) => l.id === settings.level)) settings.level = 2;
+    renderHome();
+    show(config.needLogin ? "login" : "home");
+  } catch {
+    show("home");
+    $("support-note").hidden = false;
+    $("support-note").textContent = "サーバーに接続できませんでした。ページを再読み込みしてください。";
+  }
 }
+
+init();

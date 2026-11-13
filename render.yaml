@@ -1,0 +1,16 @@
+# Render (https://render.com) 用の設定。New > Blueprint でこのリポジトリを選ぶと読み込まれます。
+services:
+  - type: web
+    name: stepspeak-english
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: APP_PASSWORD
+        sync: false

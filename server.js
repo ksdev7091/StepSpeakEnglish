@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -13,6 +14,13 @@ const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
 const EFFORT = "low";
 const MAX_TURNS = 80;
 const MAX_TEXT = 600;
+
+// 公開時の合言葉。設定すると、合言葉を知っている人だけが会話できる
+const APP_PASSWORD = process.env.APP_PASSWORD || "";
+const AUTH_COOKIE = "sse_auth";
+const AUTH_TOKEN = APP_PASSWORD
+  ? crypto.createHmac("sha256", APP_PASSWORD).update("stepspeak-auth-v1").digest("hex")
+  : "";
 
 const client = new Anthropic();
 
@@ -240,18 +248,81 @@ function toHttpError(error) {
   return new HttpError(500, "サーバーでエラーが起きました。");
 }
 
+function safeEqual(a, b) {
+  const x = crypto.createHash("sha256").update(a).digest();
+  const y = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(x, y);
+}
+
+function isAuthed(req) {
+  if (!APP_PASSWORD) return true;
+  const cookies = (req.headers.cookie || "").split(";").map((c) => c.trim().split("="));
+  const token = cookies.find(([name]) => name === AUTH_COOKIE)?.[1] || "";
+  return safeEqual(token, AUTH_TOKEN);
+}
+
+/** IPごとの簡易レート制限(メモリ内。サーバー1台での利用を想定) */
+function rateLimit({ windowMs, max, message }) {
+  const hits = new Map();
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, entry] of hits) if (entry.reset <= now) hits.delete(ip);
+  }, windowMs).unref();
+  return (req, res, next) => {
+    const now = Date.now();
+    let entry = hits.get(req.ip);
+    if (!entry || entry.reset <= now) {
+      entry = { count: 0, reset: now + windowMs };
+      hits.set(req.ip, entry);
+    }
+    if (++entry.count > max) return res.status(429).json({ error: message });
+    next();
+  };
+}
+
 const app = express();
+// Render などのホスティングはプロキシ越しに届くので、本来のIPとHTTPSを認識させる
+app.set("trust proxy", 1);
 app.use(express.json({ limit: "200kb" }));
 app.use(express.static(path.join(here, "public")));
 
-app.get("/api/config", (_req, res) => {
+app.get("/healthz", (_req, res) => res.send("ok"));
+
+app.post(
+  "/api/login",
+  rateLimit({ windowMs: 15 * 60_000, max: 10, message: "試行回数が多すぎます。しばらく待ってからもう一度試してください。" }),
+  (req, res) => {
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!APP_PASSWORD || !safeEqual(password, APP_PASSWORD)) {
+      return res.status(401).json({ error: "合言葉が違います。" });
+    }
+    res.cookie(AUTH_COOKIE, AUTH_TOKEN, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: req.secure,
+      maxAge: 365 * 24 * 60 * 60 * 1000,
+    });
+    res.json({ ok: true });
+  },
+);
+
+const guard = [
+  (req, res, next) => {
+    if (isAuthed(req)) return next();
+    res.status(401).json({ error: "合言葉を入力してください。", needLogin: true });
+  },
+  rateLimit({ windowMs: 60_000, max: 30, message: "リクエストが多すぎます。少し待ってからもう一度試してください。" }),
+];
+
+app.get("/api/config", (req, res) => {
   res.json({
+    needLogin: !isAuthed(req),
     levels: LEVELS.map(({ id, name, label, desc }) => ({ id, name, label, desc })),
     scenarios: SCENARIOS.map(({ id, emoji, title, desc }) => ({ id, emoji, title, desc })),
   });
 });
 
-app.post("/api/chat", async (req, res) => {
+app.post("/api/chat", guard, async (req, res) => {
   try {
     const level = LEVELS.find((l) => l.id === req.body?.level);
     const scenario = SCENARIOS.find((s) => s.id === req.body?.scenario);
@@ -277,7 +348,7 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-app.post("/api/review", async (req, res) => {
+app.post("/api/review", guard, async (req, res) => {
   try {
     const history = cleanHistory(req.body?.messages);
     if (!history || !history.some((m) => m.role === "user")) {
@@ -301,4 +372,7 @@ app.post("/api/review", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`StepSpeak English: http://localhost:${PORT}`);
+  if (!APP_PASSWORD && process.env.NODE_ENV === "production") {
+    console.warn("警告: APP_PASSWORD が未設定です。URLを知っている人は誰でもこのAPIキーで会話できます。");
+  }
 });

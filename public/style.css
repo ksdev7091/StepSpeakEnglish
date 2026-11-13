@@ -203,3 +203,11 @@ body[data-mode="speaking"] .mic { opacity: .75; }
 @media (min-width: 560px) {
   .level small { display: block; font-size: .7rem; color: var(--muted); text-align: center; }
 }
+
+/* 合言葉 */
+.login-form { display: grid; gap: 4px; margin-top: 24px; }
+.login-form input {
+  padding: 12px 14px; border-radius: 10px; font-size: 1.05rem;
+  border: 1.5px solid var(--line); background: var(--surface);
+}
+.login-form .status { margin-top: 8px; }
