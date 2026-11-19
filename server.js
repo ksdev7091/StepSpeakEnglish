@@ -171,6 +171,7 @@ reply_ja — a natural Japanese translation of reply.
 feedback — about the learner's most recent utterance only.
 - ok: true when it was natural enough that a native speaker would not blink; false when there is a grammar or word-choice error, or a clearly more natural way to say it.
 - better: when ok is false, the corrected or more natural English sentence. Empty string when ok is true.
+- better_ja: when ok is false, a natural Japanese sentence with the same meaning as "better". The app later shows it alone as a quiz prompt ("say this in English"), so it must be understandable without the conversation. Empty string when ok is true.
 - note_ja: one or two short Japanese sentences. When ok is false, explain why "better" is better. When ok is true, say something specific about what worked. For the opening turn, where the learner has not spoken yet, use an empty string.
 
 hints — exactly two short things the learner could say next, at their level, written in English. They are shown only when the learner asks for help.
@@ -185,6 +186,7 @@ const TurnSchema = z.object({
   feedback: z.object({
     ok: z.boolean(),
     better: z.string(),
+    better_ja: z.string(),
     note_ja: z.string(),
   }),
   hints: z.array(z.string()),
@@ -195,7 +197,7 @@ const ReviewSchema = z.object({
   summary_ja: z.string(),
   strengths_ja: z.array(z.string()),
   improvements: z.array(
-    z.object({ said: z.string(), better: z.string(), note_ja: z.string() }),
+    z.object({ said: z.string(), better: z.string(), better_ja: z.string(), note_ja: z.string() }),
   ),
   phrases: z.array(z.object({ en: z.string(), ja: z.string() })),
   next_step_ja: z.string(),
@@ -208,7 +210,7 @@ const REVIEW_PROMPT = `You are an English speaking coach for a native Japanese s
 Write a short review of the learner's speaking, in Japanese except where English examples are needed:
 - summary_ja: two or three sentences on how the session went overall.
 - strengths_ja: two or three specific things the learner did well, quoting what they said where you can.
-- improvements: up to four of the most useful corrections. "said" is what the learner said, "better" is the natural English, "note_ja" is a one-sentence explanation. Pick recurring or high-impact patterns over one-off slips. Use an empty array if there is nothing worth correcting.
+- improvements: up to four of the most useful corrections. "said" is what the learner said, "better" is the natural English, "better_ja" is a natural Japanese sentence with the same meaning as "better" that makes sense on its own (the app later shows it as a quiz prompt), "note_ja" is a one-sentence explanation. Pick recurring or high-impact patterns over one-off slips. Use an empty array if there is nothing worth correcting.
 - phrases: three to five useful English phrases from this conversation's situation that the learner should try next time, each with a Japanese meaning.
 - next_step_ja: one concrete thing to focus on in the next session.
 - level_advice: whether the learner should change difficulty next time. "up" when they kept up comfortably, answered in full sentences and made few errors; "down" when they struggled to answer most turns or mostly fell back on Japanese or single words; otherwise "stay". With fewer than about five learner turns there is too little evidence, so answer "stay".
@@ -417,6 +419,29 @@ app.post("/api/review", guard, async (req, res) => {
         schema: ReviewSchema,
       }),
     );
+  } catch (error) {
+    const e = toHttpError(error);
+    res.status(e.status).json({ error: e.message });
+  }
+});
+
+// 以前の版で保存された復習カードには日本語の意味がないので、あとから補う
+const MeaningsSchema = z.object({ ja: z.array(z.string()) });
+
+app.post("/api/meanings", guard, async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items)
+      ? req.body.items.filter((t) => typeof t === "string" && t.trim()).map((t) => t.trim().slice(0, 300))
+      : [];
+    if (!items.length || items.length > 30) throw new HttpError(400, "リクエストが正しくありません。");
+    const { ja } = await ask({
+      system:
+        "Translate each numbered English sentence into one natural Japanese sentence that a Japanese learner of English could translate back. Return the translations in the same order, exactly one per sentence.",
+      messages: [{ role: "user", content: items.map((t, i) => `${i + 1}. ${t}`).join("\n") }],
+      schema: MeaningsSchema,
+    });
+    if (ja.length !== items.length) throw new HttpError(502, "AIの応答を読み取れませんでした。もう一度試してください。");
+    res.json({ ja });
   } catch (error) {
     const e = toHttpError(error);
     res.status(e.status).json({ error: e.message });

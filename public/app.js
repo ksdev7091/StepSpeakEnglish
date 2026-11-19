@@ -31,8 +31,15 @@ function save(key, value) {
 
 const settings = { level: 2, showText: null, handsFree: false, rate: 0.85, ...read("sse-settings") };
 const stats = { turns: 0, sessions: 0, days: [], cleared: {}, ...read("sse-stats") };
-// 復習リスト: { en, ja, said?, box, due }
-let notebook = Array.isArray(read("sse-notebook")) ? read("sse-notebook") : [];
+// 復習リスト: { en, meaning, note, said, scene, cue, box, due }
+//   meaning = 出題に使う日本語の意味 / note = 解説 / said = 前に自分が言った文
+//   scene = 出てきたシーン / cue = そのとき相手が言ったセリフ
+let notebook = (Array.isArray(read("sse-notebook")) ? read("sse-notebook") : []).map((n) => {
+  if (typeof n.meaning === "string") return n;
+  // 以前の形式: 添削は ja が解説、フレーズは ja が意味だった
+  const { ja = "", ...rest } = n;
+  return n.said ? { ...rest, meaning: "", note: ja } : { ...rest, meaning: ja, note: "" };
+});
 
 function dayString(offset = 0) {
   const d = new Date();
@@ -50,10 +57,19 @@ function normalize(text) {
 }
 
 /** 直された表現や覚えたいフレーズを復習リストに入れる。追加できたら true */
-function addNote({ en, ja, said }) {
+function addNote({ en, meaning, note, said, scene, cue }) {
   const key = normalize(en || "");
   if (!key || notebook.some((n) => normalize(n.en) === key)) return false;
-  notebook.push({ en, ja: ja || "", said: said || "", box: 0, due: dayString(1) });
+  notebook.push({
+    en,
+    meaning: meaning || "",
+    note: note || "",
+    said: said || "",
+    scene: scene || "",
+    cue: cue || "",
+    box: 0,
+    due: dayString(1),
+  });
   notebook = notebook.slice(-NOTEBOOK_MAX);
   save("sse-notebook", notebook);
   return true;
@@ -367,7 +383,14 @@ async function requestTurn() {
     }
     last.feedback = data.feedback;
     if (data.feedback && !data.feedback.ok && data.feedback.better) {
-      addNote({ en: data.feedback.better, ja: data.feedback.note_ja, said: last.text });
+      addNote({
+        en: data.feedback.better,
+        meaning: data.feedback.better_ja,
+        note: data.feedback.note_ja,
+        said: last.text,
+        scene: `${scenario.emoji} ${scenario.title}`,
+        cue: messages.at(-2)?.role === "assistant" ? messages.at(-2).text : "",
+      });
     }
   }
   for (const i of data.goals_done || []) {
@@ -676,6 +699,7 @@ function leaveSession() {
 async function endSession() {
   const transcript = messages.map(({ role, text }) => ({ role, text }));
   const level = settings.level;
+  const scene = `${scenario.emoji} ${scenario.title}`;
   leaveSession();
   if (!transcript.some((m) => m.role === "user")) {
     renderHome();
@@ -690,7 +714,7 @@ async function endSession() {
   const run = async () => {
     body.replaceChildren(el("p", { class: "loading" }, "会話をふりかえっています…"));
     try {
-      renderReview(await post("/api/review", { level, messages: transcript }), level);
+      renderReview(await post("/api/review", { level, messages: transcript }), level, scene);
     } catch (error) {
       body.replaceChildren(
         el("p", { class: "status error" }, error.message),
@@ -701,9 +725,9 @@ async function endSession() {
   run();
 }
 
-function renderReview(r, level) {
-  for (const i of r.improvements) addNote({ en: i.better, ja: i.note_ja, said: i.said });
-  for (const p of r.phrases) addNote({ en: p.en, ja: p.ja });
+function renderReview(r, level, scene) {
+  for (const i of r.improvements) addNote({ en: i.better, meaning: i.better_ja, note: i.note_ja, said: i.said, scene });
+  for (const p of r.phrases) addNote({ en: p.en, meaning: p.ja, scene });
 
   const step = r.level_advice === "up" ? 1 : r.level_advice === "down" ? -1 : 0;
   const target = config.levels.find((l) => l.id === level + step && step !== 0);
@@ -778,9 +802,22 @@ function renderReview(r, level) {
 
 function startPractice() {
   unlockSpeech();
-  practice = { queue: dueNotes().slice(0, 10), retried: new Set() };
+  const session = (practice = { queue: dueNotes().slice(0, 10), retried: new Set() });
   show("practice");
   nextCard();
+
+  // 意味が保存されていない古いカードは、日本語の意味をあとから取得して出題文にする
+  const missing = session.queue.filter((n) => !n.meaning);
+  if (!missing.length) return;
+  post("/api/meanings", { items: missing.map((n) => n.en) })
+    .then(({ ja }) => {
+      missing.forEach((n, i) => (n.meaning = ja[i] || ""));
+      save("sse-notebook", notebook);
+      if (practice === session) renderCard();
+    })
+    .catch(() => {
+      // 取得できなくても、前に言った文をヒントに出題を続ける
+    });
 }
 
 function nextCard() {
@@ -865,15 +902,18 @@ function renderCard() {
   const card = el(
     "section",
     { class: "card" },
-    el("p", { class: "prompt-label" }, item.said ? "前にこう言いました。もっと自然に言うと?" : "英語で言ってみよう"),
-    el("p", { class: "prompt" }, item.said || item.ja),
+    item.scene && el("p", { class: "prompt-label" }, `シーン: ${item.scene}`),
+    item.cue && el("p", { class: "cue" }, `相手: ${item.cue}`),
+    el("p", { class: "prompt-label" }, item.meaning ? "これを英語で言ってみよう" : "前にこう言いました。もっと自然に言うと?"),
+    el("p", { class: "prompt" }, item.meaning || item.said),
     practice.heard && el("p", { class: "ja" }, `あなた: ${practice.heard}`),
     practice.revealed &&
       el(
         "div",
         { class: "answer" },
         el("p", { class: "en" }, item.en),
-        item.ja && el("p", { class: "ja" }, item.ja),
+        item.meaning && item.said && el("p", { class: "ja" }, `前に言った文: ${item.said}`),
+        item.note && el("p", { class: "ja" }, item.note),
         canSpeak && el("button", { class: "link", type: "button", onclick: () => speak(item.en) }, "🔊 お手本を聞く"),
         practice.heard &&
           el(

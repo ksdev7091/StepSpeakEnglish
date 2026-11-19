@@ -260,3 +260,4 @@ body[data-mode="confirm"] .mic .i-send { display: block; }
 .grade button { padding: 12px; border-radius: 10px; border: 1.5px solid var(--line); background: var(--surface); font-weight: 600; }
 .grade .yes { border-color: var(--good); color: var(--good); }
 .center { text-align: center; }
+.cue { margin: 2px 0 12px; padding: 8px 10px; border-radius: 10px; background: var(--bg); font-size: .92rem; }
